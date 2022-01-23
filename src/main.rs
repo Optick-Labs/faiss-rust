@@ -75,6 +75,21 @@ where Assert<{D % 8 == 0}>: IsTrue {
 }
 
 fn main() {
+    let data: [u8; 4] = [0, 255, 240, 1];
+
+    let mut data_vec: Vec<[u8; 1]> = Vec::new();
+    data_vec.push([data[0]]);
+    data_vec.push([data[1]]);
+    data_vec.push([data[2]]);
+    data_vec.push([data[3]]);
+
     let index = ffi::new_index_binary_flat(8);
+
+
+    let mut index: IndexBinaryFlat<8> = IndexBinaryFlat::new();
+    index.add_all(data_vec);
     index.display();
+    let result: IndexBinarySearchResult<2> = index.search(vec!([14]));
+    println!("1st Result, distance: {} label: {}", result.distances[0][0], result.labels[0][0]);
+    println!("2nd Result, distance: {} label: {}", result.distances[0][1], result.labels[0][1]);
 }
