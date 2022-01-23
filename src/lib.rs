@@ -1,4 +1,7 @@
+#![allow(incomplete_features, dead_code)]
 #![feature(generic_const_exprs)]
+
+use std::sync::RwLock;
 
 #[cxx::bridge(namespace = "faiss")]
 mod ffi {
@@ -15,6 +18,11 @@ mod ffi {
         fn display(&self);
     }
 }
+
+// Thread safety of FAISS is discussed here: 
+// https://github.com/facebookresearch/faiss/wiki/Threads-and-asynchronous-calls#performance-of-search
+unsafe impl Send for ffi::IndexBinaryFlat {}
+unsafe impl Sync for ffi::IndexBinaryFlat {}
 
 pub struct Assert<const COND: bool> {}
 pub trait IsTrue {}
@@ -35,26 +43,34 @@ impl<const N: usize> IndexBinarySearchResult<N> {
     }
 }
 
+// NOTE: We're handling Send/Sync via a RwLock where FAISS has guaranteed thread safety
+// on read operations. This can't be guaranteed by Rust.
 pub struct IndexBinaryFlat<const D: usize> 
 {
-    index: cxx::UniquePtr<ffi::IndexBinaryFlat>,
-    dims: i64
+    dims: i64,
+    locked_index: RwLock<cxx::UniquePtr<ffi::IndexBinaryFlat>>
 }
 impl<const D: usize> IndexBinaryFlat<D> 
 where Assert<{D % 8 == 0}>: IsTrue {
     pub fn new() -> Self {
-        Self { index: ffi::new_index_binary_flat(D as i64), dims: D as i64}
+        let index = ffi::new_index_binary_flat(D as i64);
+        Self { 
+            dims: D as i64,
+            locked_index: RwLock::new(index)
+        }
     }
 
     pub fn add(&mut self, data: [u8; D/8]) {
         unsafe {
-            self.index.as_mut().map(|x| x.add(1 as i64, &data as *const u8));
+            // TODO: This can panic if we fail in the write at some point. Crash more gracefully?
+            self.locked_index.write().unwrap().as_mut().map(|x| x.add(1 as i64, &data as *const u8));
         }
     }
 
     pub fn add_all(&mut self, data: Vec<[u8; D/8]>) {
         unsafe {
-            self.index.as_mut().map(|x| x.add(data.len() as i64, &data[0] as *const u8));
+            // TODO: This can panic if we fail in the write at some point. Crash more gracefully?
+            self.locked_index.write().unwrap().as_mut().map(|x| x.add(data.len() as i64, &data[0] as *const u8));
         }
     }
 
@@ -62,7 +78,7 @@ where Assert<{D % 8 == 0}>: IsTrue {
         let mut result: IndexBinarySearchResult<K> = IndexBinarySearchResult::new(queries.len());
 
         unsafe {
-            self.index.search(queries.len() as i64, queries.as_ptr() as *const u8,
+            self.locked_index.read().unwrap().search(queries.len() as i64, queries.as_ptr() as *const u8,
             K as i64, &mut result.distances[0] as *mut i32, &mut result.labels[0] as *mut i64);
         }
 
@@ -70,7 +86,7 @@ where Assert<{D % 8 == 0}>: IsTrue {
     }
 
     pub fn display(&self) {
-        self.index.display();
+        self.locked_index.read().unwrap().display();
     }
 }
 
@@ -82,9 +98,6 @@ fn main() {
     data_vec.push([data[1]]);
     data_vec.push([data[2]]);
     data_vec.push([data[3]]);
-
-    let index = ffi::new_index_binary_flat(8);
-
 
     let mut index: IndexBinaryFlat<8> = IndexBinaryFlat::new();
     index.add_all(data_vec);

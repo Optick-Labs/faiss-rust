@@ -2,7 +2,7 @@ fn main() {
     println!("cargo:rustc-link-search=/usr/local/lib");
     println!("cargo:rustc-link-lib=faiss");
     
-    cxx_build::bridge("src/main.rs")
+    cxx_build::bridge("src/lib.rs")
         .file("src/IndexBinaryFlat.cpp")
         .flag_if_supported("-std=c++14")
         .compile("cxxbridge-demo");
