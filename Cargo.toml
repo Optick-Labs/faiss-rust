@@ -1,0 +1,15 @@
+[package]
+name = "faiss-rust"
+version = "0.0.0"
+authors = ["Nootrality Dev <nootrality@optick.xyz>"]
+license = ""
+description = "FAISS Index serving from Elasticsearch"
+repository = "https://github.com/optick-labs/faiss-rust"
+edition = "2021"
+publish = false
+
+[dependencies]
+cxx = "1.0"
+
+[build-dependencies]
+cxx-build = "1.0"
