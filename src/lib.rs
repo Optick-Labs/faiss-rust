@@ -1,5 +1,4 @@
 #![allow(incomplete_features, dead_code)]
-#![feature(generic_const_exprs)]
 
 use std::sync::RwLock;
 
@@ -28,18 +27,32 @@ pub struct Assert<const COND: bool> {}
 pub trait IsTrue {}
 impl IsTrue for Assert<true> { }
 
-
-pub struct IndexBinarySearchResult<const N: usize> {
-    pub distances: Vec<[i32; N]>,
-    pub labels: Vec<[i64; N]>
+#[derive(Clone)]
+pub struct IndexBinarySearchQueryResult {
+    pub distance: i32,
+    pub index: i64,
+    pub label: String
 }
-impl<const N: usize> IndexBinarySearchResult<N> {
-    fn new(results: usize) -> Self {
-        let rval = Self {
-            distances: vec![[0 as i32; N]; results],
-            labels: vec![[0 as i64; N]; results]
-        };
-        return rval;
+impl IndexBinarySearchQueryResult {
+    fn new() -> Self {
+        Self {
+            distance: -1,
+            index: -1,
+            label: String::new()
+        }
+    }
+}
+
+pub struct IndexBinarySearchResult {
+    pub queries: Vec<Vec<IndexBinarySearchQueryResult>>
+}
+impl IndexBinarySearchResult {
+    fn new(k: usize, results: usize) -> Self {
+        Self {
+            queries: (0..results)
+                .map(|_i| vec![IndexBinarySearchQueryResult::new(); k] as Vec<IndexBinarySearchQueryResult>)
+                .collect()
+        }
     }
 }
 
@@ -48,61 +61,67 @@ impl<const N: usize> IndexBinarySearchResult<N> {
 pub struct IndexBinaryFlat<const D: usize> 
 {
     dims: i64,
-    locked_index: RwLock<cxx::UniquePtr<ffi::IndexBinaryFlat>>
+    index: RwLock<cxx::UniquePtr<ffi::IndexBinaryFlat>>,
+    ids: RwLock<Vec<String>>
 }
 impl<const D: usize> IndexBinaryFlat<D> 
-where Assert<{D % 8 == 0}>: IsTrue {
+// where Assert<{D % 8 == 0}>: IsTrue // TODO: Feature available in nightly
+{
     pub fn new() -> Self {
         let index = ffi::new_index_binary_flat(D as i64);
         Self { 
             dims: D as i64,
-            locked_index: RwLock::new(index)
+            index: RwLock::new(index),
+            ids: RwLock::new(Vec::new())
         }
     }
 
-    pub fn add(&mut self, data: [u8; D/8]) {
+    pub fn add(&mut self, data: [u8; D], id: String) {
         unsafe {
             // TODO: This can panic if we fail in the write at some point. Crash more gracefully?
-            self.locked_index.write().unwrap().as_mut().map(|x| x.add(1 as i64, &data as *const u8));
+            self.index.write().unwrap().as_mut().map(|x| x.add(1 as i64, &data as *const u8));
         }
+        self.ids.write().unwrap().push(id);
     }
 
-    pub fn add_all(&mut self, data: Vec<[u8; D/8]>) {
+    pub fn add_all(&mut self, data: &Vec<[u8; D]>, ids: &mut Vec<String>) {
+        if data.len() == 0 {
+            return;
+        }
+        
         unsafe {
             // TODO: This can panic if we fail in the write at some point. Crash more gracefully?
-            self.locked_index.write().unwrap().as_mut().map(|x| x.add(data.len() as i64, &data[0] as *const u8));
+            self.index.write().unwrap().as_mut().map(|x| x.add(data.len() as i64, &data[0] as *const u8));
         }
+        self.ids.write().unwrap().append(ids);
     }
 
-    pub fn search<const K: usize>(&self, queries: Vec<[u8; D/8]>) -> IndexBinarySearchResult<K> {
-        let mut result: IndexBinarySearchResult<K> = IndexBinarySearchResult::new(queries.len());
+    pub fn search(&self, queries: &Vec<[u8; D]>, k: usize) -> IndexBinarySearchResult {
+        let mut result= IndexBinarySearchResult::new(k, queries.len());
+        let mut distances: Vec<i32> = vec![-1; k*queries.len()];
+        let mut indexes: Vec<i64> = vec![-1; k*queries.len()];
 
         unsafe {
-            self.locked_index.read().unwrap().search(queries.len() as i64, queries.as_ptr() as *const u8,
-            K as i64, &mut result.distances[0] as *mut i32, &mut result.labels[0] as *mut i64);
+            self.index.read().unwrap().search(queries.len() as i64, queries.as_ptr() as *const u8,
+            k as i64, &mut distances[0] as *mut i32, &mut indexes[0] as *mut i64);
+        }
+
+        let ids = self.ids.read().unwrap();
+
+        for r in 0..queries.len() {
+            for rk in 0..k {
+                result.queries[r][rk] = IndexBinarySearchQueryResult {
+                    distance: distances[r*queries.len()+rk],
+                    index: indexes[r*queries.len()+rk],
+                    label: ids[r*queries.len()+rk].clone()
+                }
+            }
         }
 
         return result;
     }
 
     pub fn display(&self) {
-        self.locked_index.read().unwrap().display();
+        self.index.read().unwrap().display();
     }
-}
-
-fn main() {
-    let data: [u8; 4] = [0, 255, 240, 1];
-
-    let mut data_vec: Vec<[u8; 1]> = Vec::new();
-    data_vec.push([data[0]]);
-    data_vec.push([data[1]]);
-    data_vec.push([data[2]]);
-    data_vec.push([data[3]]);
-
-    let mut index: IndexBinaryFlat<8> = IndexBinaryFlat::new();
-    index.add_all(data_vec);
-    index.display();
-    let result: IndexBinarySearchResult<2> = index.search(vec!([14]));
-    println!("1st Result, distance: {} label: {}", result.distances[0][0], result.labels[0][0]);
-    println!("2nd Result, distance: {} label: {}", result.distances[0][1], result.labels[0][1]);
 }
