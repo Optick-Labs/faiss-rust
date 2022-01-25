@@ -1,6 +1,7 @@
 #pragma once
 #include <faiss/IndexBinaryFlat.h>
 #include "rust/cxx.h"
+#include <memory>
 
 namespace faiss {
     // No constructor support
