@@ -111,9 +111,9 @@ impl<const D: usize> IndexBinaryFlat<D>
         for r in 0..queries.len() {
             for rk in 0..k {
                 result.queries[r][rk] = IndexBinarySearchQueryResult {
-                    distance: distances[r*queries.len()+rk],
-                    index: indexes[r*queries.len()+rk],
-                    label: ids[r*queries.len()+rk].clone()
+                    distance: distances[k*queries.len()+rk],
+                    index: indexes[k*queries.len()+rk],
+                    label: ids[indexes[k*queries.len()+rk] as usize].clone()
                 }
             }
         }
