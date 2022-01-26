@@ -11,9 +11,11 @@ mod ffi {
         type IndexBinaryFlat;
 
         fn new_index_binary_flat(dims: i64) -> UniquePtr<IndexBinaryFlat>;
+        fn extract_values(index: &UniquePtr<IndexBinaryFlat>) -> &CxxVector<u8>;
 
         unsafe fn add(self: Pin<&mut Self>, n: i64, vals: *const u8);
         unsafe fn search(&self, n: i64, queries: *const u8, k: i64, distances: *mut i32, labels: *mut i64);
+
         fn display(&self);
     }
 }
@@ -26,6 +28,11 @@ unsafe impl Sync for ffi::IndexBinaryFlat {}
 pub struct Assert<const COND: bool> {}
 pub trait IsTrue {}
 impl IsTrue for Assert<true> { }
+
+pub struct IndexBinaryEntry<const D: usize> {
+    pub hash: [u8; D],
+    pub label: String
+}
 
 #[derive(Clone)]
 pub struct IndexBinarySearchQueryResult {
@@ -68,12 +75,49 @@ impl<const D: usize> IndexBinaryFlat<D>
 // where Assert<{D % 8 == 0}>: IsTrue // TODO: Feature available in nightly
 {
     pub fn new() -> Self {
-        let index = ffi::new_index_binary_flat(D as i64);
+        let index = ffi::new_index_binary_flat((D*8) as i64);
         Self { 
             dims: D as i64,
             index: RwLock::new(index),
             ids: RwLock::new(Vec::new())
         }
+    }
+
+    pub fn len(&self) -> usize {
+        let i = self.index.read().unwrap();
+
+        let values = ffi::extract_values(&(*i));
+        values.len()
+    }
+
+    pub fn get_all(&self) -> Vec<IndexBinaryEntry<D>> {
+        self.get_batch(0, std::usize::MAX)
+    }
+
+    pub fn get_batch(&self, offset: usize, len: usize) -> Vec<IndexBinaryEntry<D>> {
+        let mut rval: Vec<IndexBinaryEntry<D>> = Vec::new();
+        let i = self.index.read().unwrap();
+        let values = ffi::extract_values(&(*i));
+
+        println!("{}", values.len());
+
+        let offset = std::cmp::min(offset, values.len()/D);
+        let end = std::cmp::min(offset+len, values.len()/D);
+
+        for x in offset..end {
+            // TODO: This is slow, could do better since we have contiguous memory
+            let mut hash: [u8; D] = [0; D];
+            for i in 0..D {
+                unsafe {
+                    hash[i] = *values.get_unchecked(x*D+i);
+                }
+            }
+            rval.push(IndexBinaryEntry {
+                hash: hash,
+                label: self.ids.read().unwrap()[x].clone()
+            });
+        }
+        rval
     }
 
     pub fn add(&mut self, data: [u8; D], id: String) {
