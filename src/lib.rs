@@ -99,8 +99,6 @@ impl<const D: usize> IndexBinaryFlat<D>
         let i = self.index.read().unwrap();
         let values = ffi::extract_values(&(*i));
 
-        println!("{}", values.len());
-
         let offset = std::cmp::min(offset, values.len()/D);
         let end = std::cmp::min(offset+len, values.len()/D);
 
