@@ -105,7 +105,8 @@ impl<const D: usize> IndexBinaryFlat<D>
         let i = self.index.read().unwrap();
 
         let values = ffi::index_binary_flat_extract_values(&(*i));
-        values.len() // /D
+        // THIS BROKEN???? values.len() // /D
+        values.len()/(self.dims as usize)
     }
 
     pub fn get_all(&self) -> Vec<IndexBinaryEntry<D>> {
