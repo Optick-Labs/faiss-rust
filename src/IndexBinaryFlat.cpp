@@ -5,6 +5,6 @@ std::unique_ptr<faiss::IndexBinaryFlat> faiss::new_index_binary_flat(int64_t dim
   return std::unique_ptr<faiss::IndexBinaryFlat>(new faiss::IndexBinaryFlat(dims));
 }
 
-const std::vector<uint8_t>& faiss::extract_values(const std::unique_ptr<IndexBinaryFlat>& index) {
-  return (*index).xb;
+const std::vector<uint8_t>& faiss::index_binary_flat_extract_values(const std::unique_ptr<IndexBinaryFlat>& index) {
+  return index->xb;
 }
