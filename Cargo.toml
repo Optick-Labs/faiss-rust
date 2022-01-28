@@ -10,6 +10,9 @@ publish = false
 
 [dependencies]
 cxx = "1.0"
+serde = "~1"
+serde_derive = "1.0.135"
+serde_arrays = "0.1.0"
 
 [build-dependencies]
 cxx-build = "1.0"

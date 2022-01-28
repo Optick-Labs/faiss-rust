@@ -1,6 +1,9 @@
 #![allow(incomplete_features, dead_code)]
 
-use std::sync::RwLock;
+use std::{sync::RwLock, io::Write};
+
+use serde::{Serializer, ser::SerializeStruct, Deserializer, de::Visitor};
+use serde_derive::{Serialize, Deserialize};
 
 #[cxx::bridge(namespace = "faiss")]
 mod ffi {
@@ -47,7 +50,10 @@ pub struct Assert<const COND: bool> {}
 pub trait IsTrue {}
 impl IsTrue for Assert<true> { }
 
-pub struct IndexBinaryEntry<const D: usize> {
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
+pub struct IndexBinaryEntry<const D: usize> 
+{
+    #[serde(with = "serde_arrays")]
     pub hash: [u8; D],
     pub label: String
 }
@@ -156,6 +162,18 @@ impl<const D: usize> IndexBinaryFlat<D>
         self.ids.write().unwrap().append(ids);
     }
 
+    pub fn add_all_raw(&mut self, data: &Vec<u8>, ids: &mut Vec<String>) {
+        if data.len() == 0 {
+            return;
+        }
+        
+        unsafe {
+            // TODO: This can panic if we fail in the write at some point. Crash more gracefully?
+            self.index.write().unwrap().as_mut().map(|x| x.add((data.len()/D).try_into().unwrap(), &data[0] as *const u8));
+        }
+        self.ids.write().unwrap().append(ids);
+    }
+
     pub fn search(&self, queries: &Vec<[u8; D]>, k: usize) -> IndexBinarySearchResult {
         let mut result= IndexBinarySearchResult::new(k, queries.len());
         let mut distances: Vec<i32> = vec![-1; k*queries.len()];
@@ -183,6 +201,58 @@ impl<const D: usize> IndexBinaryFlat<D>
 
     pub fn display(&self) {
         self.index.read().unwrap().display();
+    }
+}
+
+impl<const D: usize> serde::Serialize for IndexBinaryMultiHash<D> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where S: Serializer
+    {
+        let mut state = serializer.serialize_struct("snapshot", 2)?;
+        state.serialize_field("dims", &self.dims)?;
+        state.serialize_field("ids", &(*self.ids.read().unwrap()))?;
+
+        let i = self.index.read().unwrap();
+        let values = ffi::index_binary_multi_hash_extract_values(&(*i));
+        unsafe {
+            let addr = values.get_unchecked(0) as *const u8;
+            // TODO: This makes a copy, do not like
+            let slice = std::slice::from_raw_parts(addr, values.len()).to_vec();
+            state.serialize_field("data", &slice)?;
+        }
+        state.end()
+    }
+}
+
+impl<'de, const N: usize> serde::Deserialize<'de> for IndexBinaryMultiHash<N> {
+    fn deserialize<D>(deserializer: D) -> Result<IndexBinaryMultiHash<N>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct IndexBinaryMultiHashVisitor<const N: usize>;
+
+        impl<'de, const N: usize> Visitor<'de> for IndexBinaryMultiHashVisitor<N> {
+            type Value = IndexBinaryMultiHash<N>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a binary file with index data")
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                    A: serde::de::SeqAccess<'de>, {
+                let dims = seq.next_element::<i64>()?.unwrap();
+                let mut ids = seq.next_element::<Vec<String>>()?.unwrap();
+                // TODO: This loads too much data, do not like
+                let data = seq.next_element::<Vec<u8>>()?.unwrap();
+                let mut index: IndexBinaryMultiHash<N> = IndexBinaryMultiHash::new(8, 32);
+                index.add_all_raw(&data, &mut ids);
+                Ok(index)
+            }
+        }
+
+        const FIELDS: &'static [&'static str] = &["dims", "ids", "data"];
+        deserializer.deserialize_struct("snapshot", FIELDS, IndexBinaryMultiHashVisitor::<N>)
     }
 }
 
@@ -255,6 +325,18 @@ impl<const D: usize> IndexBinaryMultiHash<D>
         unsafe {
             // TODO: This can panic if we fail in the write at some point. Crash more gracefully?
             self.index.write().unwrap().as_mut().map(|x| x.add(data.len() as i64, &data[0] as *const u8));
+        }
+        self.ids.write().unwrap().append(ids);
+    }
+
+    pub fn add_all_raw(&mut self, data: &Vec<u8>, ids: &mut Vec<String>) {
+        if data.len() == 0 {
+            return;
+        }
+        
+        unsafe {
+            // TODO: This can panic if we fail in the write at some point. Crash more gracefully?
+            self.index.write().unwrap().as_mut().map(|x| x.add((data.len()/D).try_into().unwrap(), &data[0] as *const u8));
         }
         self.ids.write().unwrap().append(ids);
     }

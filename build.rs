@@ -3,7 +3,7 @@ fn main() {
     println!("cargo:rustc-link-lib=faiss");
     
     cxx_build::bridge("src/lib.rs")
-        .file("src/IndexBinaryFlat.cpp")
+        .files(["src/IndexBinaryFlat.cpp", "src/IndexBinaryHash.cpp"])
         .flag_if_supported("-std=c++14")
         .compile("cxxbridge-demo");
 
