@@ -15,6 +15,8 @@ mod ffi {
 
         fn new_index_binary_flat(dims: i64) -> UniquePtr<IndexBinaryFlat>;
         fn index_binary_flat_extract_values(index: &UniquePtr<IndexBinaryFlat>) -> &CxxVector<u8>;
+        unsafe fn index_binary_flat_range_search(index: &UniquePtr<IndexBinaryFlat>, n: i64, queries: *const u8,
+            radius: i32, k: i64, distances: *mut i32, labels: *mut i64, sizes: *mut i64);
 
         unsafe fn add(self: Pin<&mut Self>, n: i64, vals: *const u8);
         unsafe fn search(&self, n: i64, queries: *const u8, k: i64, distances: *mut i32, labels: *mut i64);
@@ -26,7 +28,7 @@ mod ffi {
 
         type IndexBinaryMultiHash;
 
-        fn new_index_binary_multi_hash(dims: i64, nhash: i64, b: i64) -> UniquePtr<IndexBinaryMultiHash>;
+        fn new_index_binary_multi_hash(dims: i64, nhash: i64, b: i64, nflip: i64) -> UniquePtr<IndexBinaryMultiHash>;
         fn index_binary_multi_hash_extract_values(index: &UniquePtr<IndexBinaryMultiHash>) -> &CxxVector<u8>;
         
         unsafe fn add(self: Pin<&mut Self>, n: i64, vals: *const u8);
@@ -80,10 +82,60 @@ pub struct IndexBinarySearchResult {
 impl IndexBinarySearchResult {
     fn new(k: usize, results: usize) -> Self {
         Self {
-            queries: (0..results)
-                .map(|_i| vec![IndexBinarySearchQueryResult::new(); k] as Vec<IndexBinarySearchQueryResult>)
-                .collect()
+            queries: vec![Vec::with_capacity(k); results]
         }
+    }
+}
+
+impl<const D: usize> serde::Serialize for IndexBinaryFlat<D> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where S: Serializer
+    {
+        let mut state = serializer.serialize_struct("snapshot", 2)?;
+        state.serialize_field("dims", &self.dims)?;
+        state.serialize_field("ids", &(*self.ids.read().unwrap()))?;
+
+        let i = self.index.read().unwrap();
+        let values = ffi::index_binary_flat_extract_values(&(*i));
+        unsafe {
+            let addr = values.get_unchecked(0) as *const u8;
+            // TODO: This makes a copy, do not like
+            let slice = std::slice::from_raw_parts(addr, values.len()).to_vec();
+            state.serialize_field("data", &slice)?;
+        }
+        state.end()
+    }
+}
+
+impl<'de, const N: usize> serde::Deserialize<'de> for IndexBinaryFlat<N> {
+    fn deserialize<D>(deserializer: D) -> Result<IndexBinaryFlat<N>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct IndexBinaryFlatVisitor<const N: usize>;
+
+        impl<'de, const N: usize> Visitor<'de> for IndexBinaryFlatVisitor<N> {
+            type Value = IndexBinaryFlat<N>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a binary file with index data")
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                    A: serde::de::SeqAccess<'de>, {
+                let dims = seq.next_element::<i64>()?.unwrap();
+                let mut ids = seq.next_element::<Vec<String>>()?.unwrap();
+                // TODO: This loads too much data, do not like
+                let data = seq.next_element::<Vec<u8>>()?.unwrap();
+                let mut index: IndexBinaryFlat<N> = IndexBinaryFlat::new();
+                index.add_all_raw(&data, &mut ids);
+                Ok(index)
+            }
+        }
+
+        const FIELDS: &'static [&'static str] = &["dims", "ids", "data"];
+        deserializer.deserialize_struct("snapshot", FIELDS, IndexBinaryFlatVisitor::<N>)
     }
 }
 
@@ -199,6 +251,36 @@ impl<const D: usize> IndexBinaryFlat<D>
         return result;
     }
 
+    pub fn range_search(&self, queries: &Vec<[u8; D]>, k: usize, radius: usize) -> IndexBinarySearchResult {
+        let mut result= IndexBinarySearchResult::new(k, queries.len());
+        let mut distances: Vec<i32> = vec![-1; k*queries.len()];
+        let mut indexes: Vec<i64> = vec![-1; k*queries.len()];
+        let mut sizes: Vec<i64> = vec![-1; queries.len()];
+
+        unsafe {
+            ffi::index_binary_flat_range_search(&self.index.read().unwrap(), 
+                queries.len() as i64, queries.as_ptr() as *const u8, radius as i32, k as i64, 
+                &mut distances[0] as *mut i32, &mut indexes[0] as *mut i64, &mut sizes[0] as *mut i64);
+        }
+
+
+        let ids = self.ids.read().unwrap();
+
+        for r in 0..queries.len() {
+            for rk in 0..std::cmp::min(sizes[r], k as i64) {
+                let ix = indexes[k*r+(rk as usize)];
+                if ix >= 0 {
+                    result.queries[r].push(IndexBinarySearchQueryResult {
+                        distance: distances[k*r+(rk as usize)],
+                        index: indexes[k*r+(rk as usize)],
+                        label: ids[indexes[k*r+(rk as usize)] as usize].clone()
+                    });
+                }
+            }
+        }
+        result
+    }
+
     pub fn display(&self) {
         self.index.read().unwrap().display();
     }
@@ -245,7 +327,7 @@ impl<'de, const N: usize> serde::Deserialize<'de> for IndexBinaryMultiHash<N> {
                 let mut ids = seq.next_element::<Vec<String>>()?.unwrap();
                 // TODO: This loads too much data, do not like
                 let data = seq.next_element::<Vec<u8>>()?.unwrap();
-                let mut index: IndexBinaryMultiHash<N> = IndexBinaryMultiHash::new(8, 32);
+                let mut index: IndexBinaryMultiHash<N> = IndexBinaryMultiHash::new(32, 8, 2);
                 index.add_all_raw(&data, &mut ids);
                 Ok(index)
             }
@@ -265,8 +347,8 @@ pub struct IndexBinaryMultiHash<const D: usize>
 impl<const D: usize> IndexBinaryMultiHash<D> 
 // where Assert<{D % 8 == 0}>: IsTrue // TODO: Feature available in nightly
 {
-    pub fn new(nhash: i64, b: i64) -> Self {
-        let index = ffi::new_index_binary_multi_hash((D*8) as i64, nhash, b);
+    pub fn new(nhash: i64, b: i64, nflip: i64) -> Self {
+        let index = ffi::new_index_binary_multi_hash((D*8) as i64, nhash, b, nflip);
         Self { 
             dims: D as i64,
             index: RwLock::new(index),
@@ -336,7 +418,7 @@ impl<const D: usize> IndexBinaryMultiHash<D>
         
         unsafe {
             // TODO: This can panic if we fail in the write at some point. Crash more gracefully?
-            self.index.write().unwrap().as_mut().map(|x| x.add((data.len()/D).try_into().unwrap(), &data[0] as *const u8));
+            self.index.write().unwrap().as_mut().map(|x| x.add(ids.len().try_into().unwrap(), &data[0] as *const u8));
         }
         self.ids.write().unwrap().append(ids);
     }
@@ -364,6 +446,36 @@ impl<const D: usize> IndexBinaryMultiHash<D>
         }
 
         return result;
+    }
+
+    pub fn range_search(&self, queries: &Vec<[u8; D]>, k: usize, radius: usize) -> IndexBinarySearchResult {
+        let mut result= IndexBinarySearchResult::new(k, queries.len());
+        let mut distances: Vec<i32> = vec![-1; k*queries.len()];
+        let mut indexes: Vec<i64> = vec![-1; k*queries.len()];
+        let mut sizes: Vec<i64> = vec![-1; queries.len()];
+
+        unsafe {
+            ffi::index_binary_multi_hash_range_search(&self.index.read().unwrap(), 
+                queries.len() as i64, queries.as_ptr() as *const u8, radius as i32, k as i64, 
+                &mut distances[0] as *mut i32, &mut indexes[0] as *mut i64, &mut sizes[0] as *mut i64);
+        }
+
+
+        let ids = self.ids.read().unwrap();
+
+        for r in 0..queries.len() {
+            for rk in 0..std::cmp::min(sizes[r], k as i64) {
+                let ix = indexes[k*r+(rk as usize)];
+                if ix >= 0 {
+                    result.queries[r].push(IndexBinarySearchQueryResult {
+                        distance: distances[k*r+(rk as usize)],
+                        index: indexes[k*r+(rk as usize)],
+                        label: ids[indexes[k*r+(rk as usize)] as usize].clone()
+                    });
+                }
+            }
+        }
+        result
     }
 
     pub fn display(&self) {
