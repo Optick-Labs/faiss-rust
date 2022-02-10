@@ -1,6 +1,6 @@
 #![allow(incomplete_features, dead_code)]
 
-use std::{sync::RwLock, io::Write};
+use std::sync::RwLock;
 
 use serde::{Serializer, ser::SerializeStruct, Deserializer, de::Visitor};
 use serde_derive::{Serialize, Deserialize};
@@ -57,21 +57,19 @@ pub struct IndexBinaryEntry<const D: usize>
 {
     #[serde(with = "serde_arrays")]
     pub hash: [u8; D],
-    pub label: String
+    pub label: usize
 }
 
 #[derive(Clone)]
 pub struct IndexBinarySearchQueryResult {
     pub distance: i32,
-    pub index: i64,
-    pub label: String
+    pub index: usize
 }
 impl IndexBinarySearchQueryResult {
     fn new() -> Self {
         Self {
             distance: -1,
-            index: -1,
-            label: String::new()
+            index: 0
         }
     }
 }
@@ -93,7 +91,6 @@ impl<const D: usize> serde::Serialize for IndexBinaryFlat<D> {
     {
         let mut state = serializer.serialize_struct("snapshot", 2)?;
         state.serialize_field("dims", &self.dims)?;
-        state.serialize_field("ids", &(*self.ids.read().unwrap()))?;
 
         let i = self.index.read().unwrap();
         let values = ffi::index_binary_flat_extract_values(&(*i));
@@ -124,12 +121,10 @@ impl<'de, const N: usize> serde::Deserialize<'de> for IndexBinaryFlat<N> {
             fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
             where
                     A: serde::de::SeqAccess<'de>, {
-                let dims = seq.next_element::<i64>()?.unwrap();
-                let mut ids = seq.next_element::<Vec<String>>()?.unwrap();
                 // TODO: This loads too much data, do not like
                 let data = seq.next_element::<Vec<u8>>()?.unwrap();
                 let mut index: IndexBinaryFlat<N> = IndexBinaryFlat::new();
-                index.add_all_raw(&data, &mut ids);
+                index.add_all_raw(&data);
                 Ok(index)
             }
         }
@@ -144,8 +139,7 @@ impl<'de, const N: usize> serde::Deserialize<'de> for IndexBinaryFlat<N> {
 pub struct IndexBinaryFlat<const D: usize> 
 {
     dims: i64,
-    index: RwLock<cxx::UniquePtr<ffi::IndexBinaryFlat>>,
-    ids: RwLock<Vec<String>>
+    index: RwLock<cxx::UniquePtr<ffi::IndexBinaryFlat>>
 }
 impl<const D: usize> IndexBinaryFlat<D> 
 // where Assert<{D % 8 == 0}>: IsTrue // TODO: Feature available in nightly
@@ -154,8 +148,7 @@ impl<const D: usize> IndexBinaryFlat<D>
         let index = ffi::new_index_binary_flat((D*8) as i64);
         Self { 
             dims: D as i64,
-            index: RwLock::new(index),
-            ids: RwLock::new(Vec::new())
+            index: RwLock::new(index)
         }
     }
 
@@ -188,21 +181,20 @@ impl<const D: usize> IndexBinaryFlat<D>
             
             rval.push(IndexBinaryEntry {
                 hash: hash,
-                label: self.ids.read().unwrap()[x].clone()
+                label: x
             });
         }
         rval
     }
 
-    pub fn add(&mut self, data: [u8; D], id: String) {
+    pub fn add(&mut self, data: [u8; D]) {
         unsafe {
             // TODO: This can panic if we fail in the write at some point. Crash more gracefully?
             self.index.write().unwrap().as_mut().map(|x| x.add(1 as i64, &data as *const u8));
         }
-        self.ids.write().unwrap().push(id);
     }
 
-    pub fn add_all(&mut self, data: &Vec<[u8; D]>, ids: &mut Vec<String>) {
+    pub fn add_all(&mut self, data: &Vec<[u8; D]>) {
         if data.len() == 0 {
             return;
         }
@@ -211,10 +203,9 @@ impl<const D: usize> IndexBinaryFlat<D>
             // TODO: This can panic if we fail in the write at some point. Crash more gracefully?
             self.index.write().unwrap().as_mut().map(|x| x.add(data.len() as i64, &data[0] as *const u8));
         }
-        self.ids.write().unwrap().append(ids);
     }
 
-    pub fn add_all_raw(&mut self, data: &Vec<u8>, ids: &mut Vec<String>) {
+    pub fn add_all_raw(&mut self, data: &Vec<u8>) {
         if data.len() == 0 {
             return;
         }
@@ -223,7 +214,6 @@ impl<const D: usize> IndexBinaryFlat<D>
             // TODO: This can panic if we fail in the write at some point. Crash more gracefully?
             self.index.write().unwrap().as_mut().map(|x| x.add((data.len()/D).try_into().unwrap(), &data[0] as *const u8));
         }
-        self.ids.write().unwrap().append(ids);
     }
 
     pub fn search(&self, queries: &Vec<[u8; D]>, k: usize) -> IndexBinarySearchResult {
@@ -236,14 +226,11 @@ impl<const D: usize> IndexBinaryFlat<D>
             k as i64, &mut distances[0] as *mut i32, &mut indexes[0] as *mut i64);
         }
 
-        let ids = self.ids.read().unwrap();
-
         for r in 0..queries.len() {
             for rk in 0..k {
                 result.queries[r][rk] = IndexBinarySearchQueryResult {
                     distance: distances[k*r+rk],
-                    index: indexes[k*r+rk],
-                    label: ids[indexes[k*r+rk] as usize].clone()
+                    index: indexes[k*r+rk] as usize
                 }
             }
         }
@@ -263,17 +250,13 @@ impl<const D: usize> IndexBinaryFlat<D>
                 &mut distances[0] as *mut i32, &mut indexes[0] as *mut i64, &mut sizes[0] as *mut i64);
         }
 
-
-        let ids = self.ids.read().unwrap();
-
         for r in 0..queries.len() {
             for rk in 0..std::cmp::min(sizes[r], k as i64) {
                 let ix = indexes[k*r+(rk as usize)];
                 if ix >= 0 {
                     result.queries[r].push(IndexBinarySearchQueryResult {
                         distance: distances[k*r+(rk as usize)],
-                        index: indexes[k*r+(rk as usize)],
-                        label: ids[indexes[k*r+(rk as usize)] as usize].clone()
+                        index: indexes[k*r+(rk as usize)] as usize
                     });
                 }
             }
@@ -323,7 +306,6 @@ impl<'de, const N: usize> serde::Deserialize<'de> for IndexBinaryMultiHash<N> {
             fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
             where
                     A: serde::de::SeqAccess<'de>, {
-                let dims = seq.next_element::<i64>()?.unwrap();
                 let mut ids = seq.next_element::<Vec<String>>()?.unwrap();
                 // TODO: This loads too much data, do not like
                 let data = seq.next_element::<Vec<u8>>()?.unwrap();
@@ -385,7 +367,7 @@ impl<const D: usize> IndexBinaryMultiHash<D>
             
             rval.push(IndexBinaryEntry {
                 hash: hash,
-                label: self.ids.read().unwrap()[x].clone()
+                label: x
             });
         }
         rval
@@ -433,14 +415,11 @@ impl<const D: usize> IndexBinaryMultiHash<D>
             k as i64, &mut distances[0] as *mut i32, &mut indexes[0] as *mut i64);
         }
 
-        let ids = self.ids.read().unwrap();
-
         for r in 0..queries.len() {
             for rk in 0..k {
                 result.queries[r][rk] = IndexBinarySearchQueryResult {
                     distance: distances[k*r+rk],
-                    index: indexes[k*r+rk],
-                    label: ids[indexes[k*r+rk] as usize].clone()
+                    index: indexes[k*r+rk] as usize
                 }
             }
         }
@@ -460,17 +439,13 @@ impl<const D: usize> IndexBinaryMultiHash<D>
                 &mut distances[0] as *mut i32, &mut indexes[0] as *mut i64, &mut sizes[0] as *mut i64);
         }
 
-
-        let ids = self.ids.read().unwrap();
-
         for r in 0..queries.len() {
             for rk in 0..std::cmp::min(sizes[r], k as i64) {
                 let ix = indexes[k*r+(rk as usize)];
                 if ix >= 0 {
                     result.queries[r].push(IndexBinarySearchQueryResult {
                         distance: distances[k*r+(rk as usize)],
-                        index: indexes[k*r+(rk as usize)],
-                        label: ids[indexes[k*r+(rk as usize)] as usize].clone()
+                        index: indexes[k*r+(rk as usize)] as usize
                     });
                 }
             }
