@@ -89,8 +89,7 @@ impl<const D: usize> serde::Serialize for IndexBinaryFlat<D> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
         where S: Serializer
     {
-        let mut state = serializer.serialize_struct("snapshot", 2)?;
-        state.serialize_field("dims", &self.dims)?;
+        let mut state = serializer.serialize_struct("snapshot", 1)?;
 
         let i = self.index.read().unwrap();
         let values = ffi::index_binary_flat_extract_values(&(*i));
@@ -129,7 +128,7 @@ impl<'de, const N: usize> serde::Deserialize<'de> for IndexBinaryFlat<N> {
             }
         }
 
-        const FIELDS: &'static [&'static str] = &["dims", "ids", "data"];
+        const FIELDS: &'static [&'static str] = &["data"];
         deserializer.deserialize_struct("snapshot", FIELDS, IndexBinaryFlatVisitor::<N>)
     }
 }
